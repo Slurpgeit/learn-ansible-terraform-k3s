@@ -1,0 +1,131 @@
+- name: Download cloud images
+  hosts: pve
+  vars:
+    api_user: "{{ ansible_user }}@pam"
+    api_token_id: "ansible"
+    api_token_secret: "d8c0a950-b8af-4810-bebb-f92a531b8119"
+    cloud_images:
+      - jammy
+      - noble
+    storage: nvme
+    image_storage: local
+    vm_cores: 2
+    vm_memory: 2048
+    vm_bios: ovmf
+    vm_machine: q35
+    vm_net:
+      model: virtio
+    vm_scsihw: virtio-scsi-single
+    vm_agent: enabled=1,fstrim_cloned_disks=1
+    vm_cpu: host
+  tasks:
+    - name: Install required dependencies
+      ansible.builtin.apt:
+        name: "{{ item }}"
+        state: latest
+      loop:
+        - python3-proxmoxer
+        - python3-requests
+
+    - name: Get path to storage {{ storage }}
+      community.general.proxmox_storage_info:
+        api_host: "{{ inventory_hostname }}"
+        api_user: "{{ api_user }}"
+        api_token_id: "{{ api_token_id }}"
+        api_token_secret: "{{ api_token_secret | default(omit)}}"
+        storage: "{{ image_storage }}"
+      register: proxmox_storages
+
+    - name: Ensure cloud image directory exists
+      file:
+        path: "{{ proxmox_storages.proxmox_storages[0].path }}/images/0/"
+        state: directory
+
+    - name: Download latest ubuntu cloud images
+      ansible.builtin.get_url:
+        url: "https://cloud-images.ubuntu.com/{{ item }}/current/{{ item }}-server-cloudimg-amd64.img"
+        # This is a workaround. Wait until https://forum.proxmox.com/threads/new-vm-from-cloud-init-image-via-api.111091/ is fixed
+        dest: "{{ proxmox_storages.proxmox_storages[0].path }}/images/0/{{ item }}-server-cloudimg-amd64.qcow2"
+        checksum: "sha256:https://cloud-images.ubuntu.com/{{ item }}/current/SHA256SUMS"
+      loop: "{{ cloud_images }}"
+
+    - name: List existing nodes
+      community.general.proxmox_node_info:
+        api_host: "{{ inventory_hostname }}"
+        api_user: "{{ api_user }}"
+        api_token_id: "{{ api_token_id }}"
+        api_token_secret: "{{ api_token_secret | default(omit)}}"
+      register: proxmox_nodes
+
+    # - name: List all existing virtual machines on node
+    #   community.general.proxmox_vm_info:
+    #     api_host: "{{ inventory_hostname }}"
+    #     api_user: "{{ api_user }}"
+    #     api_token_id: "{{ api_token_id }}"
+    #     api_token_secret: "{{ api_token_secret | default(omit)}}"
+    #     vmid: 100
+    #   register: proxmox_vms
+
+    - name: Create cloud image VMs
+      community.general.proxmox_kvm:
+        api_host: "{{ inventory_hostname }}"
+        api_user: "{{ api_user }}"
+        api_token_id: "{{ api_token_id }}"
+        api_token_secret: "{{ api_token_secret | default(omit)}}"
+        name: "ubuntu-{{ item }}-cloudimg-template"
+        node: "{{ proxmox_nodes.proxmox_nodes[0].node }}"
+        vmid: "{{ 10000 + index }}"
+        update: true
+        cores: "{{ vm_cores }}"
+        memory: "{{ vm_memory }}"
+        bios: "{{ vm_bios }}"
+        machine: "{{ vm_machine }}"
+        net: "{{ vm_net }}"
+        scsihw: "{{ vm_scsihw }}"
+        agent: "{{ vm_agent }}"
+        cpu: "{{ vm_cpu }}"
+      loop: "{{ cloud_images }}"
+      loop_control:
+        index_var: index
+      register: cloud_vms
+
+    - name: Create new disk in VM
+      community.general.proxmox_disk:
+        api_host: "{{ inventory_hostname }}"
+        api_user: "{{ api_user }}"
+        api_token_id: "{{ api_token_id }}"
+        api_token_secret: "{{ api_token_secret | default(omit)}}"
+        vmid: "{{ item.vmid }}"
+        import_from: "{{ image_storage }}:0/{{ item.item }}-server-cloudimg-amd64.qcow2"
+        disk: scsi0
+        storage: "{{ storage }}"
+        create: forced
+      loop: "{{ cloud_vms.results }}"
+      loop_control:
+        label: "{{ item.invocation.module_args.name }}"
+      register: cloud_disks
+
+    - name: Retrieve information about specific VM by ID
+      community.general.proxmox_vm_info:
+        api_host: "{{ inventory_hostname }}"
+        api_user: "{{ api_user }}"
+        api_token_id: "{{ api_token_id }}"
+        api_token_secret: "{{ api_token_secret | default(omit)}}"
+        vmid: "{{ item.vmid }}"
+      loop: "{{ cloud_vms.results }}"
+      register: cloud_vm_info
+
+    - debug:
+        var: cloud_vm_info
+
+    - name: Convert to template
+      community.general.proxmox_kvm:
+        api_host: "{{ inventory_hostname }}"
+        api_user: "{{ api_user }}"
+        api_token_id: "{{ api_token_id }}"
+        api_token_secret: "{{ api_token_secret | default(omit)}}"
+        vmid: "{{ item.vmid }}"
+        state: template
+      loop: "{{ cloud_vms.results }}"
+      loop_control:
+        label: "{{ item.invocation.module_args.name }}"
