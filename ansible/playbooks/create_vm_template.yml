@@ -1,13 +1,13 @@
 - name: Playbook for creating a Ubuntu cloud-init template
-  hosts: rome
+  hosts: pve
   vars:
     #Change the image
-    image_version: jammy
+    image_version: noble
     #Change the image location
     image_location: /var/lib/vz/template/iso
     envs:
       #Set your storage pool (ex. local-lvm,local-zfs)
-      STORAGE_POOL: VM
+      STORAGE_POOL: local-lvm
       #Set the vm id
       VM_ID: 10000
       #Set the vm name
